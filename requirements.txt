@@ -1,0 +1,8 @@
+numpy
+h5py
+torch
+pandas
+wandb
+pytest
+pytest-cov
+ruff

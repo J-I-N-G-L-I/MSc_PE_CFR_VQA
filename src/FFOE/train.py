@@ -12,6 +12,8 @@ from lxrt.optimization import BertAdam
 import pandas as pd
 import pickle
 import wandb
+from src.metrics import f1_by_type, f1_macro_micro
+
 warmup_updates = 4000
 
 
@@ -187,15 +189,23 @@ def train(args, model, train_loader, eval_loader, num_epochs, output, opt=None, 
             trainer.model.train(False)
             # eval_cfrf_score: sum of the batch_score calculated by comparing the fusion_pred and ground truth
             # fusion_pred: weighted combination of ban_logits and lxmert_logits
-            eval_cfrf_score, fg_score, coarse_score, ens_score, bound, eval_loss = evaluate(model, eval_loader, args, criterion)
+            eval_cfrf_score, fg_score, coarse_score, ens_score, bound, eval_loss, eval_metrics = evaluate(model, eval_loader, args, criterion)
             trainer.model.train(True)
-            wandb.log({"eval_cfrf_score": eval_cfrf_score, "eval_loss": eval_loss})
+            wandb.log({
+                "eval_cfrf_score": eval_cfrf_score,
+                "eval_loss": eval_loss,
+                "eval_f1_macro": eval_metrics.get('f1_macro', 0.0),
+                "eval_f1_micro": eval_metrics.get('f1_micro', 0.0),
+            })
+            for qtype, score in eval_metrics.get('f1_by_type', {}).items():
+                wandb.log({f"eval_f1_{qtype}": score})
 
         logger.write('epoch %d, time: %.2f' % (epoch, time.time()-t))
         logger.write('\ttrain_loss: %.2f, norm: %.4f, score: %.2f, question type score: %.2f' %
                      (total_loss, total_norm/count_norm, train_score, train_question_type_score))
         if eval_loader is not None:
             logger.write('\tCFRF score: %.2f (%.2f)' % (100 * eval_cfrf_score, 100 * bound))
+            logger.write('\tF1 macro: %.2f, F1 micro: %.2f' % (100 * eval_metrics.get('f1_macro', 0.0), 100 * eval_metrics.get('f1_micro', 0.0)))
 
         # Save per epoch
         if epoch >= saving_epoch:
@@ -227,6 +237,9 @@ def evaluate(model, dataloader, args, criterion):
     n = 0  # num of batches in one epoch
     # df = pd.DataFrame(columns=["Img_id", "Questions", "Answers", "Predictions"])
     batch_dfs = []
+    all_preds = []
+    all_targets = []
+    question_types: list[str] = []
     with torch.no_grad():
         # features, spatials, stat_features, entity, attr_features, question, sent (tuple), target, imgid (tuple), ans
         for i, (v, b, w, e, attr, q, s, a, imgid, ans) in enumerate(dataloader):
@@ -302,6 +315,20 @@ def evaluate(model, dataloader, args, criterion):
                 })
 
                 batch_dfs.append(batch_df)
+            all_preds.append(final_preds.detach().cpu())
+            all_targets.append(a.detach().cpu())
+            start_index = num_data
+            entries = getattr(dataloader.dataset, 'entries', None)
+            if entries is not None:
+                for offset in range(final_preds.size(0)):
+                    entry_idx = start_index + offset
+                    if entry_idx < len(entries):
+                        question_types.append(entries[entry_idx].get('question_type', 'unknown'))
+                    else:
+                        question_types.append('unknown')
+            else:
+                question_types.extend(['unknown'] * final_preds.size(0))
+
             batch_scores = compute_score_with_logits(final_preds, a).sum()  # tensor(212., device='cuda:0')
             cfrf_score += batch_scores  # tensor(212., device='cuda:0')
             upper_bound += (a.max(1)[0]).sum()  # tensor(256., device='cuda:0')
@@ -319,5 +346,21 @@ def evaluate(model, dataloader, args, criterion):
         result_df = pd.concat(batch_dfs, ignore_index=True)
         result_df.to_csv(csv_path, index=False)
 
-    return cfrf_score, fg_score, coarse_score, ens_score, upper_bound, eval_losses
+    if all_preds:
+        preds_tensor = torch.cat(all_preds, dim=0)
+        targets_tensor = torch.cat(all_targets, dim=0)
+        f1_macro, f1_micro = f1_macro_micro(preds_tensor, targets_tensor)
+        f1_types = f1_by_type(preds_tensor, targets_tensor, question_types)
+    else:
+        f1_macro = 0.0
+        f1_micro = 0.0
+        f1_types = {}
+
+    metrics = {
+        'f1_macro': f1_macro,
+        'f1_micro': f1_micro,
+        'f1_by_type': f1_types,
+    }
+
+    return cfrf_score, fg_score, coarse_score, ens_score, upper_bound, eval_losses, metrics
 
