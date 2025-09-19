@@ -9,7 +9,6 @@ import os
 import json
 import _pickle as cPickle
 import numpy as np
-from torch import nn
 
 import src.utils as utils
 import warnings
@@ -18,6 +17,7 @@ with warnings.catch_warnings():
     import h5py
 import torch
 from torch.utils.data import Dataset
+from torch import nn
 import itertools
 COUNTING_ONLY = False
 
@@ -109,6 +109,7 @@ def _create_entry(img, question, answer, entity, teacher_logit):
     if None!=answer:  # {'image_id': 3455, 'labels': [439], 'question_id': '001000', 'scores': [1.0]}
         answer.pop('image_id')
         answer.pop('question_id')
+    question_type = question.get('question_type') or question.get('type') or 'unknown'
     entry = {
         'question_id' : question['question_id'],
         'image_id'    : question['image_id'],
@@ -116,6 +117,7 @@ def _create_entry(img, question, answer, entity, teacher_logit):
         'question'    : question['question'],
         'answer'      : answer,  # {'labels': [439], 'scores': [1.0]}
         'entity'      : entity,  # ['picture', 'in']
+        'question_type': question_type,
         'teacher_logit': teacher_logit}
     return entry
 
@@ -240,7 +242,10 @@ class GQAFeatureDataset(Dataset):
         # read the image_data.json, to get the width and height of the images, for normalising the bounding boxes
         self.image_data = json.load(open(os.path.join(dataroot, 'image_data.json'), 'rb'))
         # reform the dictionary
-        self.new_image_data = {image["image_id"]: {k: v for k, v in image.items() if k != "image_id"} for image in self.image_data}
+        if isinstance(self.image_data, dict):
+            self.new_image_data = self.image_data
+        else:
+            self.new_image_data = {image["image_id"]: {k: v for k, v in image.items() if k != "image_id"} for image in self.image_data}
 
 
         # Load image feature

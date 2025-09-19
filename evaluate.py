@@ -32,6 +32,8 @@ def parse_args():
     # Choices of models
     parser.add_argument('--model', type=str, default='CFRF_Model', choices=['CFRF_Model'],
                         help='the model we use')
+    parser.add_argument('--bert_name', type=str, default='bert-base-uncased',
+                        help='Pretrained BERT checkpoint to use for language encoding')
 
     # INTERACTION LEARNING COMPONENTS HYPER-PARAMETERS------------------------------------------------------------------
     # BAN
@@ -176,8 +178,11 @@ if __name__ == '__main__':
     print("Evaluating...")
     model.train(False)
     criterion = torch.nn.BCEWithLogitsLoss(reduction='sum')
-    eval_cfrf_score, _, _, _, bound, eval_loss = evaluate(model, eval_loader, args, criterion)
+    eval_cfrf_score, _, _, _, bound, eval_loss, eval_metrics = evaluate(model, eval_loader, args, criterion)
     print('\tCFRF score: %.2f (%.2f)' % (100 * eval_cfrf_score, 100 * bound))
+    print('\tF1 macro: %.2f, F1 micro: %.2f' % (100 * eval_metrics.get('f1_macro', 0.0), 100 * eval_metrics.get('f1_micro', 0.0)))
+    for qtype, score in sorted(eval_metrics.get('f1_by_type', {}).items()):
+        print(f"\tF1[{qtype}]: {100 * score:.2f}")
 
 # if __name__ == '__main__':
 #     sweep_config = {

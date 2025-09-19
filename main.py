@@ -54,6 +54,8 @@ def parse_args():
                         help='the model we use')
     parser.add_argument('--dataset', type=str, default='GQA', choices=['GQA'],
                         help='Dataset to train and evaluate')
+    parser.add_argument('--bert_name', type=str, default='bert-base-uncased',
+                        help='Pretrained BERT checkpoint to initialise tokenizer and encoder')
 
     # INTERACTION LEARNING COMPONENTS HYPER-PARAMETERS------------------------------------------------------------------
     # BAN
