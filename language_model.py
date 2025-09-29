@@ -111,8 +111,10 @@ class BertEmbedding(nn.Module):
     def __init__(self, args, max_seq_length):
         super(BertEmbedding, self).__init__()
 
+        bert_name = getattr(args, 'bert_name', 'bert-base-uncased')
+        do_lower_case = 'uncased' in bert_name.lower()
         # Using the bert tokenizer
-        self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", do_lower_case=True)
+        self.tokenizer = BertTokenizer.from_pretrained(bert_name, do_lower_case=do_lower_case)
         self.max_seq_length = max_seq_length
 
         if args.from_scratch:
@@ -120,7 +122,7 @@ class BertEmbedding(nn.Module):
             self.model.apply(self.model.init_bert_weights)
 
         # Bert embedding
-        self.bert = BertFeatureExtraction.from_pretrained('bert-base-uncased', args=args)
+        self.bert = BertFeatureExtraction.from_pretrained(bert_name, args=args)
 
     def forward(self, sents):
         train_features = convert_sents_to_features(
