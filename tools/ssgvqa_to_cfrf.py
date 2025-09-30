@@ -756,4 +756,3 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 if __name__ == "__main__":
     run_pipeline(parse_args())
-

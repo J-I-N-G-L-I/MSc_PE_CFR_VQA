@@ -9,8 +9,9 @@ import pytest
 np = pytest.importorskip("numpy")
 h5py = pytest.importorskip("h5py")
 torch = pytest.importorskip("torch")
-pytest.importorskip("PIL")
+pytest.importorskip("PIL")  # pillow is required by the code under test
 
+# Make project root importable
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from tools.ssgvqa_to_cfrf import run_pipeline  # noqa: E402
@@ -52,7 +53,9 @@ def sample_ssg(tmp_path):
 
     dictionary_terms = set()
 
-    # Video 1 (pixel coordinates)
+    # --------------------
+    # Video 1 (pixel coords)
+    # --------------------
     qa_vid1 = qa_root / "VID01"
     qa_vid1.mkdir()
     qa_vid1.joinpath("0.txt").write_text(
@@ -71,11 +74,13 @@ def sample_ssg(tmp_path):
 
     roi_vid1 = roi_root / "VID01" / "labels" / "vqa" / "img_features" / "roi"
     roi_vid1.mkdir(parents=True)
+    # HDF5 ROI features (each row = one ROI; columns include bbox at [14:18])
     roi_frame0 = np.zeros((2, 530), dtype=np.float32)
     roi_frame0[:, 18:] = 1.0
     roi_frame0[0, 14:18] = [10, 20, 40, 90]
     roi_frame0[1, 14:18] = [50, 60, 120, 180]
     _write_hdf5(roi_vid1 / "000000.hdf5", roi_frame0)
+
     roi_frame1 = np.zeros((1, 530), dtype=np.float32)
     roi_frame1[:, 18:] = 2.0
     roi_frame1[0, 14:18] = [30, 30, 80, 120]
@@ -87,34 +92,16 @@ def sample_ssg(tmp_path):
 
     scene_vid1_frame0 = _scene_graph(
         [
-            {
-                "component": "Liver",
-                "bbox": [0, 0, 120, 180],
-                "attributes": ["healthy"],
-            },
-            {
-                "component": "Grasper",
-                "bbox": [10, 10, 80, 150],
-                "attributes": ["metal"],
-            },
+            {"component": "Liver", "bbox": [0, 0, 120, 180], "attributes": ["healthy"]},
+            {"component": "Grasper", "bbox": [10, 10, 80, 150], "attributes": ["metal"]},
         ],
         triplets=["grasper,grasp,liver"],
     )
     scene_vid1_frame1 = _scene_graph(
-        [
-            {
-                "component": "Clip",
-                "bbox": [0, 0, 80, 120],
-                "attributes": ["silver"],
-            }
-        ]
+        [{"component": "Clip", "bbox": [0, 0, 80, 120], "attributes": ["silver"]}]
     )
-    (scene_root / "VID01_000000.json").write_text(
-        json.dumps(scene_vid1_frame0), encoding="utf-8"
-    )
-    (scene_root / "VID01_000001.json").write_text(
-        json.dumps(scene_vid1_frame1), encoding="utf-8"
-    )
+    (scene_root / "VID01_000000.json").write_text(json.dumps(scene_vid1_frame0), encoding="utf-8")
+    (scene_root / "VID01_000001.json").write_text(json.dumps(scene_vid1_frame1), encoding="utf-8")
 
     dictionary_terms.update(
         {
@@ -131,18 +118,18 @@ def sample_ssg(tmp_path):
         }
     )
 
-    # Video 2 (normalised coordinates, stored under _clean)
+    # --------------------
+    # Video 2 (normalized coords, stored under *_clean)
+    # --------------------
     qa_vid2 = qa_root / "VID02_clean"
     qa_vid2.mkdir()
-    qa_vid2.joinpath("2.txt").write_text(
-        "How many clips are present?|2",
-        encoding="utf-8",
-    )
+    qa_vid2.joinpath("2.txt").write_text("How many clips are present?|2", encoding="utf-8")
 
     roi_vid2 = roi_root / "VID02_clean" / "labels" / "vqa" / "img_features" / "roi"
     roi_vid2.mkdir(parents=True)
     roi_frame2 = np.zeros((3, 530), dtype=np.float32)
     roi_frame2[:, 18:] = 3.0
+    # Normalized [x1,y1,w,h] embedded at [14:18] — tests whether pipeline handles normalized boxes
     roi_frame2[0, 14:18] = [0.5, 0.5, 0.4, 0.4]
     roi_frame2[1, 14:18] = [0.2, 0.3, 0.2, 0.2]
     roi_frame2[2, 14:18] = [0.8, 0.6, 0.1, 0.2]
@@ -152,32 +139,26 @@ def sample_ssg(tmp_path):
     _write_hdf5(global_vid2 / "1x1" / "000002.hdf5", np.full((1, 512), 0.3, dtype=np.float32))
 
     scene_vid2 = _scene_graph(
-        [
-            {
-                "component": "Clip",
-                "bbox": [0, 0, 100, 100],
-                "attributes": ["silver"],
-            }
-        ]
+        [{"component": "Clip", "bbox": [0, 0, 100, 100], "attributes": ["silver"]}]
     )
-    (scene_root / "VID02_000002.json").write_text(
-        json.dumps(scene_vid2), encoding="utf-8"
-    )
+    (scene_root / "VID02_000002.json").write_text(json.dumps(scene_vid2), encoding="utf-8")
 
     dictionary_terms.update({"how", "many", "clips", "present", "2"})
 
+    # Dictionary
     dictionary_path = tmp_path / "dictionary.pkl"
     vocab_list = sorted(dictionary_terms)
     word2idx = {word: idx for idx, word in enumerate(vocab_list)}
     with dictionary_path.open("wb") as fp:
         pickle.dump((word2idx, vocab_list), fp)
 
+    # Run pipeline
     out_root = tmp_path / "out"
     args = argparse.Namespace(
         qa_dir=str(qa_root),
         scene_graph_dir=str(scene_root),
-        features_dir=str(roi_root),
-        yolo_boxes_dir=str(global_root),
+        features_dir=str(roi_root),        # ROI HDF5 features
+        yolo_boxes_dir=str(global_root),   # global features by grid (1x1, 4x4)
         split_config=str(split_path),
         out_dir=str(out_root),
         topk=2,
@@ -206,7 +187,7 @@ def test_bridge_outputs_shapes_and_targets(sample_ssg):
     assert all(label2ans[ans2label[label]] == label for label in ans2label)
 
     image_meta = json.loads((out_root / "image_data.json").read_text(encoding="utf-8"))
-    assert image_meta
+    assert image_meta  # non-empty
 
     for split in sample_ssg["splits"]:
         h5_name = "ori_train.hdf5" if split == "train" else f"{split}.hdf5"
@@ -220,14 +201,15 @@ def test_bridge_outputs_shapes_and_targets(sample_ssg):
         assert pos_boxes.dtype == np.int32
         assert pos_boxes[0, 0] == 0
         assert pos_boxes[-1, 1] == image_features.shape[0]
+        # allow a tiny negative epsilon from numeric ops
         assert np.all(spatial_features >= -1e-6)
         assert np.all(spatial_features <= 1.0 + 1e-6)
 
         with (cache_dir / f"{split}_target.pkl").open("rb") as fp:
             targets = pickle.load(fp)
-        assert targets
+        assert targets  # non-empty
         for target in targets:
-            assert target["scores"]
+            assert target["scores"]  # at least one score
             for label in target["labels"]:
                 assert 0 <= label < len(label2ans)
 
@@ -238,6 +220,7 @@ def test_bridge_outputs_shapes_and_targets(sample_ssg):
             assert "question_id" in entry
             assert entry["image_id"] in image_meta
 
+        # aux files created
         stat_words_path = out_root / f"{split}_2_stats_words.json"
         assert stat_words_path.exists()
         attr_words_path = out_root / f"{split}_attr_words_non_plural_words.json"
@@ -262,9 +245,7 @@ def test_dataset_getitem_shapes(sample_ssg):
         topk=2,
         tiny=False,
     )
-    dataset = GQAFeatureDataset(
-        args, "train", dictionary, dataroot=str(out_root), adaptive=True
-    )
+    dataset = GQAFeatureDataset(args, "train", dictionary, dataroot=str(out_root), adaptive=True)
     sample = dataset[0]
     (
         features,
@@ -284,6 +265,5 @@ def test_dataset_getitem_shapes(sample_ssg):
     assert target.shape[0] == dataset.num_ans_candidates
     assert float(target.sum()) > 0.0
     assert isinstance(sent, str)
-    assert ans
+    assert ans  # non-empty answer string
     assert dataset.entries[0]["question_type"] in {"exist", "query", "other", "count"}
-
