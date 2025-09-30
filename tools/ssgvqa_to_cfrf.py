@@ -1,7 +1,6 @@
-"""Utilities to bridge SSG-VQA assets to the CFRF cache layout."""
+"""transfer SSGVQA dataset (qa, scene graph, roi features) to the CFRF cache layout."""
 
 from __future__ import annotations
-
 import argparse
 import json
 import math
@@ -9,31 +8,28 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
-
 import numpy as np
-
-try:
-    import h5py
-except ImportError:  # pragma: no cover - handled in tests via skip
-    h5py = None
+from tqdm import tqdm
+import h5py
+import pickle
 
 JsonDict = MutableMapping[str, object]
 
+def _maybe_tqdm(iterable, enable: bool, **kwargs):
+    """return a tqdm-wrapped iterable when enable=True, else the original iterable."""
+    return tqdm(iterable, **kwargs) if enable else iterable
 
 @dataclass
 class QAEntry:
-    """Lightweight container for a single question/answer pair."""
-
+    """a single question/answer pair."""
     question_id: str
     question: str
     answers: List[str]
     question_type: str
 
-
 @dataclass
 class FrameRecord:
-    """Aggregated assets for a single (video, frame) pair."""
-
+    """aggregated related inofrmation for a single (video, frame) pair."""
     split: str
     video_id: str
     frame_index: int
@@ -47,23 +43,15 @@ class FrameRecord:
     width: Optional[int] = None
     height: Optional[int] = None
 
-
-# -----------------------------------------------------------------------------
-# Normalisation helpers
-# -----------------------------------------------------------------------------
-
-
+# Normalisation utils
 def _normalise_token(token: str) -> str:
     return token.lower().strip()
-
 
 def _normalise_answer(answer: str) -> str:
     return " ".join(_normalise_token(answer).split())
 
-
 def _candidate_frame_stems(index: int) -> List[str]:
-    """Generate plausible filename stems for a frame index."""
-
+    """Generate filename stems for a frame index."""
     candidates: List[str] = []
     neighbours = {index}
     if index > 0:
@@ -73,16 +61,14 @@ def _candidate_frame_stems(index: int) -> List[str]:
         for width in (6, 5, 4, 3, 2):
             candidates.append(f"{value:0{width}d}")
         candidates.append(str(value))
-    # Preserve order while deduplicating
+    # keep order while deduplicating
     return list(dict.fromkeys(candidates))
 
 
-# -----------------------------------------------------------------------------
-# Dataset discovery
-# -----------------------------------------------------------------------------
-
+# SSGVQA folders address loading
 
 def _resolve_video_dir(root: Path, video_id: str) -> Optional[Path]:
+    # for test sets, may have suffixes "_clean"
     candidates = [
         video_id,
         f"{video_id}_clean",
@@ -96,20 +82,17 @@ def _resolve_video_dir(root: Path, video_id: str) -> Optional[Path]:
     matches = sorted(root.glob(f"{video_id}*"))
     return matches[0] if matches else None
 
-
 def _find_first_dataset(handle: "h5py.File") -> np.ndarray:
     for key in handle.keys():
         data = handle[key][()]
         return np.asarray(data)
     return np.asarray(handle[()])
 
-
 def _load_hdf5_matrix(path: Path) -> np.ndarray:
     if h5py is None:  # pragma: no cover
-        raise ImportError("h5py is required to read HDF5 features")
+        raise ImportError("h5py library is required to read HDF5 files")
     with h5py.File(path, "r") as fp:
         return _find_first_dataset(fp).astype(np.float32)
-
 
 def _resolve_frame_file(base: Path, index: int, suffix: str) -> Tuple[Optional[Path], Optional[str]]:
     for stem in _candidate_frame_stems(index):
@@ -118,7 +101,7 @@ def _resolve_frame_file(base: Path, index: int, suffix: str) -> Tuple[Optional[P
             return candidate, stem
     return None, None
 
-
+# TODO: improve question type detection
 def _question_type_from_text(question: str) -> str:
     q_lower = question.lower().strip()
     prefixes = {
@@ -142,7 +125,6 @@ def _question_type_from_text(question: str) -> str:
             return label
     return "other"
 
-
 def _parse_answers(answer_segment: str) -> List[str]:
     answers: List[str] = []
     for raw in answer_segment.split(","):
@@ -152,9 +134,8 @@ def _parse_answers(answer_segment: str) -> List[str]:
         answers.append(_normalise_answer(candidate))
     if not answers:
         return ["unknown"]
-    # Deduplicate while preserving order
+    # keep order
     return list(dict.fromkeys(answers))
-
 
 def _parse_qa_file(path: Path, image_id: str) -> List[QAEntry]:
     qa_items: List[QAEntry] = []
@@ -177,7 +158,6 @@ def _parse_qa_file(path: Path, image_id: str) -> List[QAEntry]:
             )
         )
     return qa_items
-
 
 def _load_scene_graph(scene_path: Path) -> Tuple[Counter, List[str], Optional[int], Optional[int]]:
     if scene_path is None or not scene_path.exists():
@@ -251,7 +231,6 @@ def _load_scene_graph(scene_path: Path) -> Tuple[Counter, List[str], Optional[in
 
     return vocab, attr_phrases, width, height
 
-
 def _determine_dimensions(
     preferred_width: Optional[int],
     preferred_height: Optional[int],
@@ -262,7 +241,6 @@ def _determine_dimensions(
     height = preferred_height or default_height
     return max(1, int(width)), max(1, int(height))
 
-
 def _load_dataset(
     qa_root: Path,
     scene_root: Path,
@@ -271,6 +249,7 @@ def _load_dataset(
     split_config: Mapping[str, Sequence[str]],
     default_width: int,
     default_height: int,
+    progress: bool = True,
 ) -> Tuple[Dict[str, List[FrameRecord]], Counter, Dict[str, Dict[str, int]]]:
     records: Dict[str, List[FrameRecord]] = {}
     answer_vocab: Counter = Counter()
@@ -278,7 +257,7 @@ def _load_dataset(
 
     for split, videos in split_config.items():
         split_records: List[FrameRecord] = []
-        for video_id in videos:
+        for video_id in _maybe_tqdm(videos, progress, desc=f"[{split}] videos", unit="vid"):
             qa_video_dir = _resolve_video_dir(qa_root, video_id)
             if qa_video_dir is None:
                 raise FileNotFoundError(f"QA directory missing for video {video_id}")
@@ -293,7 +272,7 @@ def _load_dataset(
                 [p for p in qa_video_dir.glob("*.txt") if p.is_file()],
                 key=lambda p: int(p.stem),
             )
-            for qa_file in frame_files:
+            for qa_file in _maybe_tqdm(frame_files, progress, desc=f"{video_id} frames", unit="frame", leave=False):
                 nominal_index = int(qa_file.stem)
                 roi_base = (
                     roi_video_dir
@@ -360,11 +339,7 @@ def _load_dataset(
     return records, answer_vocab, image_meta
 
 
-# -----------------------------------------------------------------------------
-# Feature construction
-# -----------------------------------------------------------------------------
-
-
+# feature construction
 def _roi_to_features(
     roi_path: Path,
     width: int,
@@ -380,14 +355,14 @@ def _roi_to_features(
         return features, spatial
 
     max_coord = float(np.max(np.abs(coords))) if coords.size else 0.0
-    if max_coord <= 1.5:  # Already normalised (center_x, center_y, width, height)
+    if max_coord <= 1.5:  # already normalised (center_x, center_y, width, height); (fault tolerance)
         x_c, y_c, w_box, h_box = coords.T
         x1 = np.clip(x_c - w_box / 2.0, 0.0, 1.0)
         y1 = np.clip(y_c - h_box / 2.0, 0.0, 1.0)
         x2 = np.clip(x_c + w_box / 2.0, 0.0, 1.0)
         y2 = np.clip(y_c + h_box / 2.0, 0.0, 1.0)
         spatial = np.stack([x1, y1, x2, y2, w_box, h_box], axis=1)
-    else:  # Pixel coordinates (x1, y1, x2, y2)
+    else:  # pixel coordinates (x1, y1, x2, y2)
         if width <= 0 or height <= 0:
             raise ValueError(
                 f"Invalid image size {width}x{height} for ROI normalisation"
@@ -408,7 +383,6 @@ def _roi_to_features(
         )
     return features.astype(np.float32), np.clip(spatial.astype(np.float32), 0.0, 1.0)
 
-
 def _grid_spatial(index: int, grid_size: int) -> Tuple[float, float, float, float]:
     row = index // grid_size
     col = index % grid_size
@@ -420,7 +394,8 @@ def _grid_spatial(index: int, grid_size: int) -> Tuple[float, float, float, floa
     y2 = min(1.0, y1 + step_y)
     return x1, y1, x2, y2
 
-
+# SSGVQA also provide different size of global features (1x1, 4x4, 9x9), but here is optional.
+# if provide, features = [ROI; GLOBAL], spatials = [ROI; GLOBAL](axis=0)
 def _load_global_features(paths: Iterable[Path]) -> Tuple[np.ndarray, np.ndarray]:
     feature_blocks: List[np.ndarray] = []
     spatial_blocks: List[np.ndarray] = []
@@ -445,18 +420,14 @@ def _load_global_features(paths: Iterable[Path]) -> Tuple[np.ndarray, np.ndarray
         np.concatenate(spatial_blocks, axis=0),
     )
 
-
-def build_hdf5(records: Sequence[FrameRecord], out_h5: Path) -> Dict[str, int]:
-    if h5py is None:  # pragma: no cover
-        raise ImportError("h5py is required to build HDF5 caches")
-
+def build_hdf5(records: Sequence[FrameRecord], out_h5: Path, progress: bool = True) -> Dict[str, int]:
     feature_segments: List[np.ndarray] = []
     spatial_segments: List[np.ndarray] = []
     pos_boxes: List[Tuple[int, int]] = []
     image_ids: List[str] = []
     cursor = 0
 
-    for record in records:
+    for record in _maybe_tqdm(records, progress, desc=f"Packing {out_h5.name}", unit="img"):
         if record.roi_path is None:
             continue
         roi_features, roi_spatial = _roi_to_features(
@@ -499,21 +470,16 @@ def build_hdf5(records: Sequence[FrameRecord], out_h5: Path) -> Dict[str, int]:
     return {img_id: idx for idx, img_id in enumerate(image_ids)}
 
 
-# -----------------------------------------------------------------------------
-# Metadata writers
-# -----------------------------------------------------------------------------
-
-
+# writer
 def build_image_data(image_meta: Mapping[str, Dict[str, int]], out_json: Path) -> None:
     out_json.parent.mkdir(parents=True, exist_ok=True)
     with out_json.open("w", encoding="utf-8") as fp:
         json.dump(dict(sorted(image_meta.items())), fp, indent=2)
 
-
-def build_qa_entities(records: Sequence[FrameRecord], out_json: Path) -> None:
+def build_qa_entities(records: Sequence[FrameRecord], out_json: Path, progress: bool = True) -> None:
     questions: List[JsonDict] = []
     missing_scene: List[str] = []
-    for record in records:
+    for record in _maybe_tqdm(records, progress, desc=f"Entities {out_json.name}", unit="img", leave=False):
         if not record.scene_vocab:
             missing_scene.append(record.image_id)
         vocab = record.scene_vocab
@@ -542,10 +508,10 @@ def build_qa_entities(records: Sequence[FrameRecord], out_json: Path) -> None:
         with skip_path.open("w", encoding="utf-8") as fp:
             json.dump(sorted(set(missing_scene)), fp, indent=2)
 
-
 def build_answer_tables(
     records: Mapping[str, Sequence[FrameRecord]],
     out_dir: Path,
+    progress: bool = True,
 ) -> Tuple[Dict[str, int], List[str], Dict[str, List[QAEntry]]]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -567,8 +533,8 @@ def build_answer_tables(
     ans2label = {ans: idx for idx, ans in enumerate(sorted_answers)}
     label2ans = list(sorted_answers)
 
-    import pickle
-
+    # for pkl files
+    # import pickle
     with (out_dir / "ans2label.pkl").open("wb") as fp:
         pickle.dump(ans2label, fp)
     with (out_dir / "label2ans.pkl").open("wb") as fp:
@@ -576,7 +542,7 @@ def build_answer_tables(
 
     for split, items in questions_by_split.items():
         targets = []
-        for record in records[split]:
+        for record in _maybe_tqdm(split_records, progress, desc=f"[{split}] collect answers", unit="img", leave=False):
             for item in record.qa_items:
                 labels = [ans2label[ans] for ans in item.answers]
                 scores = [1.0 for _ in labels]
@@ -593,19 +559,19 @@ def build_answer_tables(
 
     return ans2label, label2ans, questions_by_split
 
-
 def build_stat_attr_words(
     records: Sequence[FrameRecord],
     out_stat_json: Path,
     out_attr_json: Path,
     topk: int = 30,
+    progress: bool = True,
 ) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
     stat_words: Dict[str, str] = {}
     attr_words: Dict[str, List[str]] = {}
     stat_skip: List[str] = []
     attr_skip: List[str] = []
 
-    for record in records:
+    for record in _maybe_tqdm(records, progress, desc=f"Stats/attr {out_stat_json.name}", unit="img", leave=False):
         if record.scene_vocab:
             most_common = [word for word, _ in record.scene_vocab.most_common(topk)]
             stat_words[record.image_id] = ",".join(most_common)
@@ -638,19 +604,12 @@ def build_stat_attr_words(
 
     return stat_words, attr_words
 
-
 def _write_imgid2idx(mapping: Dict[str, int], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    import pickle
-
     with output_path.open("wb") as fp:
         pickle.dump(mapping, fp)
 
-
-# -----------------------------------------------------------------------------
 # Pipeline driver
-# -----------------------------------------------------------------------------
-
 
 def _load_split_config(path: Path) -> Dict[str, List[str]]:
     with path.open("r", encoding="utf-8") as fp:
@@ -664,7 +623,6 @@ def _load_split_config(path: Path) -> Dict[str, List[str]]:
         split_config[str(split)] = [str(video) for video in videos]
     return split_config
 
-
 def run_pipeline(args: argparse.Namespace) -> None:
     qa_root = Path(args.qa_dir)
     scene_root = Path(args.scene_graph_dir)
@@ -672,6 +630,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     global_root = Path(args.yolo_boxes_dir) if args.yolo_boxes_dir else None
     split_config = _load_split_config(Path(args.split_config))
 
+    use_progress = not getattr(args, "no_progress", False)
     records, _, image_meta = _load_dataset(
         qa_root,
         scene_root,
@@ -686,13 +645,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
     build_image_data(image_meta, out_root / "image_data.json")
-    ans2label, label2ans, _ = build_answer_tables(records, out_root / "cache")
+    ans2label, label2ans, _ = build_answer_tables(records, out_root / "cache", progress=use_progress)
 
     for split, split_records in records.items():
         if not split_records:
             continue
         h5_name = "ori_train.hdf5" if split == "train" else f"{split}.hdf5"
-        img_mapping = build_hdf5(split_records, out_root / h5_name)
+        img_mapping = build_hdf5(split_records, out_root / h5_name, progress=use_progress)
         _write_imgid2idx(img_mapping, out_root / f"{split}_imgid2idx.pkl")
 
         build_qa_entities(
@@ -704,23 +663,24 @@ def run_pipeline(args: argparse.Namespace) -> None:
             out_root / f"{split}_{args.topk}_stats_words.json",
             out_root / f"{split}_attr_words_non_plural_words.json",
             topk=args.topk,
+            progress=use_progress,
         )
 
-    # Write vocab just to avoid unused variable warnings
+    # write vocab just to avoid unused variable warnings
     _ = ans2label, label2ans
-
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert SSG-VQA assets to CFRF caches",
+        description="Transfer SSGVQA data to CFRF caches",
     )
-    parser.add_argument("--qa_dir", required=True, help="Directory with QA txt trees")
+    parser.add_argument("--qa_dir", required=False, default= r"E:\LJ\datasets\SSGVQA\ssg-qa\ssg-qa", help="Directory with QA txt trees")
     parser.add_argument(
-        "--scene_graph_dir", required=True, help="Directory with per-frame scene graphs"
+        "--scene_graph_dir", required=False, default= r"E:\LJ\datasets\SSGVQA\scene_graph_ssgqa\scene_graph", help="Directory with per-frame scene graphs"
     )
     parser.add_argument(
         "--features_dir",
-        required=True,
+        required=False,
+        default= r"E:\LJ\datasets\SSGVQA\roi_yolo_coord\roi_yolo_coord",
         help="Directory with ROI HDF5 features (per video)",
     )
     parser.add_argument(
@@ -730,11 +690,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--split_config",
-        required=True,
+        required=False,
+        # replace with the split.json path, or create by yourslef:
+        # {
+        #     "train": [
+        #         "VID73", "VID40", "VID62", "VID42", "VID29", "VID56", "VID50", "VID78", "VID66", "VID13",
+        #         "VID52", "VID06", "VID36", "VID05", "VID12", "VID26", "VID68", "VID32", "VID49", "VID65",
+        #         "VID47", "VID04", "VID23", "VID79", "VID51", "VID10", "VID57", "VID75", "VID25", "VID14",
+        #         "VID15", "VID08", "VID80", "VID27", "VID70"
+        #     ],
+        #     "val": ["VID18", "VID48", "VID01", "VID35", "VID31"],
+        #     "test": ["VID22", "VID74", "VID60", "VID02", "VID43"]
+        # }
+        default= r"E:\LJ\datasets\SSGVQA\split.json",
         help="JSON mapping split name to list of video ids",
     )
     parser.add_argument(
-        "--out_dir", required=True, help="Output directory for CFRF caches"
+        "--out_dir", required=False, default="./ssgvqa_cfrf", help="Output directory for CFRF caches"
     )
     parser.add_argument(
         "--topk", type=int, default=30, help="Number of statistical words per image"
@@ -742,17 +714,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--default_width",
         type=int,
-        default=400,
+        default=430,
         help="Fallback image width when metadata is unavailable",
     )
     parser.add_argument(
         "--default_height",
         type=int,
-        default=300,
+        default=240,
         help="Fallback image height when metadata is unavailable",
     )
+    parser.add_argument(
+    "--no_progress",
+        default=True,
+        action = "store_true",
+        help = "Disable tqdm progress bars",
+    )
     return parser.parse_args(argv)
-
 
 if __name__ == "__main__":
     run_pipeline(parse_args())
